@@ -154,16 +154,32 @@ static int parser_csi(const char *leader, const long args[], int argcount, const
   return 1;
 }
 
-static int parser_osc(const char *command, size_t cmdlen, void *user)
+static int parser_osc(int command, VTermStringFragment frag, void *user)
 {
-  printf("%sOSC %.*s%s", special_begin, (int)cmdlen, command, special_end);
+  if(frag.initial) {
+    if(command == -1)
+      printf("%sOSC ", special_begin);
+    else
+      printf("%sOSC %d;", special_begin, command);
+  }
+
+  printf("%.*s", (int)frag.len, frag.str);
+
+  if(frag.final)
+    printf("%s", special_end);
 
   return 1;
 }
 
-static int parser_dcs(const char *command, size_t cmdlen, void *user)
+static int parser_dcs(const char *command, size_t commandlen, VTermStringFragment frag, void *user)
 {
-  printf("%sDCS %.*s%s", special_begin, (int)cmdlen, command, special_end);
+  if(frag.initial)
+    printf("%sDCS %.*s", special_begin, (int)commandlen, command);
+
+  printf("%.*s", (int)frag.len, frag.str);
+
+  if(frag.final)
+    printf("%s", special_end);
 
   return 1;
 }
@@ -202,8 +218,8 @@ int main(int argc, char *argv[])
   }
 
   if(use_colour) {
-    special_begin = "\e[7m{";
-    special_end   = "}\e[m";
+    special_begin = "\x1b[7m{";
+    special_end   = "}\x1b[m";
   }
 
   /* Size matters not for the parser */
@@ -221,4 +237,6 @@ int main(int argc, char *argv[])
 
   close(fd);
   vterm_free(vt);
+
+  return 0;
 }

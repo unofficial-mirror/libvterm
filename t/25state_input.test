@@ -49,7 +49,7 @@ INCHAR 0 20
 INCHAR S 20
   output "\e[32;2u"
 INCHAR C 20
-  output "\e[32;5u"
+  output "\0"
 INCHAR SC 20
   output "\e[32;6u"
 INCHAR A 20
@@ -57,7 +57,7 @@ INCHAR A 20
 INCHAR SA 20
   output "\e[32;4u"
 INCHAR CA 20
-  output "\e[32;7u"
+  output "\e\0"
 INCHAR SCA 20
   output "\e[32;8u"
 
@@ -111,6 +111,18 @@ PUSH "\e[20h"
 INKEY 0 Enter
   output "\x0d\x0a"
 
+!Unmodified F1 is SS3 P
+INKEY 0 F1
+  output "\eOP"
+
+!Modified F1 is CSI P
+INKEY S F1
+  output "\e[1;2P"
+INKEY A F1
+  output "\e[1;3P"
+INKEY C F1
+  output "\e[1;5P"
+
 !Keypad in DECKPNM
 INKEY 0 KP0
   output "0"
@@ -119,3 +131,25 @@ INKEY 0 KP0
 PUSH "\e="
 INKEY 0 KP0
   output "\eOp"
+
+!Bracketed paste mode off
+PASTE START
+PASTE END
+
+!Bracketed paste mode on
+PUSH "\e[?2004h"
+PASTE START
+  output "\e[200~"
+PASTE END
+  output "\e[201~"
+
+!Focus reporting disabled
+FOCUS IN
+FOCUS OUT
+
+!Focus reporting enabled
+PUSH "\e[?1004h"
+FOCUS IN
+  output "\e[I"
+FOCUS OUT
+  output "\e[O"

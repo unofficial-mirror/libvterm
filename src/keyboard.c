@@ -30,6 +30,10 @@ void vterm_keyboard_unichar(VTerm *vt, uint32_t c, VTermModifier mod)
     case '\\': case ']': case '^': case '_':
       needs_CSIu = 0;
       break;
+    /* Shift-space needs CSIu */
+    case ' ':
+      needs_CSIu = !!(mod & VTERM_MOD_SHIFT);
+      break;
     /* All other characters needs CSIu except for letters a-z */
     default:
       needs_CSIu = (c < 'a' || c > 'z');
@@ -44,7 +48,7 @@ void vterm_keyboard_unichar(VTerm *vt, uint32_t c, VTermModifier mod)
   if(mod & VTERM_MOD_CTRL)
     c &= 0x1f;
 
-  vterm_push_output_sprintf(vt, "%s%c", mod & VTERM_MOD_ALT ? "\e" : "", c);
+  vterm_push_output_sprintf(vt, "%s%c", mod & VTERM_MOD_ALT ? ESC_S : "", c);
 }
 
 typedef struct {
@@ -69,7 +73,7 @@ static keycodes_s keycodes[] = {
   { KEYCODE_ENTER,   '\r'   }, // ENTER
   { KEYCODE_TAB,     '\t'   }, // TAB
   { KEYCODE_LITERAL, '\x7f' }, // BACKSPACE == ASCII DEL
-  { KEYCODE_LITERAL, '\e'   }, // ESCAPE
+  { KEYCODE_LITERAL, '\x1b' }, // ESCAPE
 
   { KEYCODE_CSI_CURSOR, 'A' }, // UP
   { KEYCODE_CSI_CURSOR, 'B' }, // DOWN
@@ -86,10 +90,10 @@ static keycodes_s keycodes[] = {
 
 static keycodes_s keycodes_fn[] = {
   { KEYCODE_NONE },            // F0 - shouldn't happen
-  { KEYCODE_CSI_CURSOR, 'P' }, // F1
-  { KEYCODE_CSI_CURSOR, 'Q' }, // F2
-  { KEYCODE_CSI_CURSOR, 'R' }, // F3
-  { KEYCODE_CSI_CURSOR, 'S' }, // F4
+  { KEYCODE_SS3,    'P' },     // F1
+  { KEYCODE_SS3,    'Q' },     // F2
+  { KEYCODE_SS3,    'R' },     // F3
+  { KEYCODE_SS3,    'S' },     // F4
   { KEYCODE_CSINUM, '~', 15 }, // F5
   { KEYCODE_CSINUM, '~', 17 }, // F6
   { KEYCODE_CSINUM, '~', 18 }, // F7
@@ -169,7 +173,7 @@ void vterm_keyboard_key(VTerm *vt, VTermKey key, VTermModifier mod)
     if(mod & (VTERM_MOD_SHIFT|VTERM_MOD_CTRL))
       vterm_push_output_sprintf_ctrl(vt, C1_CSI, "%d;%du", k.literal, mod+1);
     else
-      vterm_push_output_sprintf(vt, mod & VTERM_MOD_ALT ? "\e%c" : "%c", k.literal);
+      vterm_push_output_sprintf(vt, mod & VTERM_MOD_ALT ? ESC_S "%c" : "%c", k.literal);
     break;
 
   case KEYCODE_SS3: case_SS3:
@@ -207,4 +211,16 @@ void vterm_keyboard_key(VTerm *vt, VTermKey key, VTermModifier mod)
     else
       goto case_LITERAL;
   }
+}
+
+void vterm_keyboard_start_paste(VTerm *vt)
+{
+  if(vt->state->mode.bracketpaste)
+    vterm_push_output_sprintf_ctrl(vt, C1_CSI, "200~");
+}
+
+void vterm_keyboard_end_paste(VTerm *vt)
+{
+  if(vt->state->mode.bracketpaste)
+    vterm_push_output_sprintf_ctrl(vt, C1_CSI, "201~");
 }

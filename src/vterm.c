@@ -43,18 +43,20 @@ VTerm *vterm_new_with_allocator(int rows, int cols, VTermAllocatorFunctions *fun
   vt->rows = rows;
   vt->cols = cols;
 
-  vt->parser_state = NORMAL;
+  vt->parser.state = NORMAL;
 
-  vt->parser_callbacks = NULL;
-  vt->cbdata           = NULL;
+  vt->parser.callbacks = NULL;
+  vt->parser.cbdata    = NULL;
 
-  vt->strbuffer_len = 64;
-  vt->strbuffer_cur = 0;
-  vt->strbuffer = vterm_allocator_malloc(vt, vt->strbuffer_len);
+  vt->outfunc = NULL;
+  vt->outdata = NULL;
 
   vt->outbuffer_len = 64;
   vt->outbuffer_cur = 0;
   vt->outbuffer = vterm_allocator_malloc(vt, vt->outbuffer_len);
+
+  vt->tmpbuffer_len = 64;
+  vt->tmpbuffer = vterm_allocator_malloc(vt, vt->tmpbuffer_len);
 
   return vt;
 }
@@ -67,8 +69,8 @@ void vterm_free(VTerm *vt)
   if(vt->state)
     vterm_state_free(vt->state);
 
-  vterm_allocator_free(vt, vt->strbuffer);
   vterm_allocator_free(vt, vt->outbuffer);
+  vterm_allocator_free(vt, vt->tmpbuffer);
 
   vterm_allocator_free(vt, vt);
 }
@@ -96,8 +98,8 @@ void vterm_set_size(VTerm *vt, int rows, int cols)
   vt->rows = rows;
   vt->cols = cols;
 
-  if(vt->parser_callbacks && vt->parser_callbacks->resize)
-    (*vt->parser_callbacks->resize)(rows, cols, vt->cbdata);
+  if(vt->parser.callbacks && vt->parser.callbacks->resize)
+    (*vt->parser.callbacks->resize)(rows, cols, vt->parser.cbdata);
 }
 
 int vterm_get_utf8(const VTerm *vt)
@@ -110,12 +112,21 @@ void vterm_set_utf8(VTerm *vt, int is_utf8)
   vt->mode.utf8 = is_utf8;
 }
 
+void vterm_output_set_callback(VTerm *vt, VTermOutputCallback *func, void *user)
+{
+  vt->outfunc = func;
+  vt->outdata = user;
+}
+
 INTERNAL void vterm_push_output_bytes(VTerm *vt, const char *bytes, size_t len)
 {
-  if(len > vt->outbuffer_len - vt->outbuffer_cur) {
-    DEBUG_LOG("vterm_push_output(): buffer overflow; truncating output\n");
-    len = vt->outbuffer_len - vt->outbuffer_cur;
+  if(vt->outfunc) {
+    (vt->outfunc)(bytes, len, vt->outdata);
+    return;
   }
+
+  if(len > vt->outbuffer_len - vt->outbuffer_cur)
+    return;
 
   memcpy(vt->outbuffer + vt->outbuffer_cur, bytes, len);
   vt->outbuffer_cur += len;
@@ -123,10 +134,10 @@ INTERNAL void vterm_push_output_bytes(VTerm *vt, const char *bytes, size_t len)
 
 INTERNAL void vterm_push_output_vsprintf(VTerm *vt, const char *format, va_list args)
 {
-  int written = vsnprintf(vt->outbuffer + vt->outbuffer_cur,
-      vt->outbuffer_len - vt->outbuffer_cur,
+  size_t len = vsnprintf(vt->tmpbuffer, vt->tmpbuffer_len,
       format, args);
-  vt->outbuffer_cur += written;
+
+  vterm_push_output_bytes(vt, vt->tmpbuffer, len);
 }
 
 INTERNAL void vterm_push_output_sprintf(VTerm *vt, const char *format, ...)
@@ -139,30 +150,64 @@ INTERNAL void vterm_push_output_sprintf(VTerm *vt, const char *format, ...)
 
 INTERNAL void vterm_push_output_sprintf_ctrl(VTerm *vt, unsigned char ctrl, const char *fmt, ...)
 {
+  size_t cur;
+
   if(ctrl >= 0x80 && !vt->mode.ctrl8bit)
-    vterm_push_output_sprintf(vt, "\e%c", ctrl - 0x40);
+    cur = snprintf(vt->tmpbuffer, vt->tmpbuffer_len,
+        ESC_S "%c", ctrl - 0x40);
   else
-    vterm_push_output_sprintf(vt, "%c", ctrl);
+    cur = snprintf(vt->tmpbuffer, vt->tmpbuffer_len,
+        "%c", ctrl);
+
+  if(cur >= vt->tmpbuffer_len)
+    return;
 
   va_list args;
   va_start(args, fmt);
-  vterm_push_output_vsprintf(vt, fmt, args);
+  cur += vsnprintf(vt->tmpbuffer + cur, vt->tmpbuffer_len - cur,
+      fmt, args);
   va_end(args);
+
+  if(cur >= vt->tmpbuffer_len)
+    return;
+
+  vterm_push_output_bytes(vt, vt->tmpbuffer, cur);
 }
 
-INTERNAL void vterm_push_output_sprintf_dcs(VTerm *vt, const char *fmt, ...)
+INTERNAL void vterm_push_output_sprintf_str(VTerm *vt, unsigned char ctrl, bool term, const char *fmt, ...)
 {
-  if(!vt->mode.ctrl8bit)
-    vterm_push_output_sprintf(vt, "\e%c", C1_DCS - 0x40);
-  else
-    vterm_push_output_sprintf(vt, "%c", C1_DCS);
+  size_t cur = 0;
+
+  if(ctrl) {
+    if(ctrl >= 0x80 && !vt->mode.ctrl8bit)
+      cur = snprintf(vt->tmpbuffer, vt->tmpbuffer_len,
+          ESC_S "%c", ctrl - 0x40);
+    else
+      cur = snprintf(vt->tmpbuffer, vt->tmpbuffer_len,
+          "%c", ctrl);
+
+    if(cur >= vt->tmpbuffer_len)
+      return;
+  }
 
   va_list args;
   va_start(args, fmt);
-  vterm_push_output_vsprintf(vt, fmt, args);
+  cur += vsnprintf(vt->tmpbuffer + cur, vt->tmpbuffer_len - cur,
+      fmt, args);
   va_end(args);
 
-  vterm_push_output_sprintf_ctrl(vt, C1_ST, "");
+  if(cur >= vt->tmpbuffer_len)
+    return;
+
+  if(term) {
+    cur += snprintf(vt->tmpbuffer + cur, vt->tmpbuffer_len - cur,
+        vt->mode.ctrl8bit ? "\x9C" : ESC_S "\\"); // ST
+
+    if(cur >= vt->tmpbuffer_len)
+      return;
+  }
+
+  vterm_push_output_bytes(vt, vt->tmpbuffer, cur);
 }
 
 size_t vterm_output_get_buffer_size(const VTerm *vt)
@@ -195,17 +240,6 @@ size_t vterm_output_read(VTerm *vt, char *buffer, size_t len)
   return len;
 }
 
-void vterm_parser_set_callbacks(VTerm *vt, const VTermParserCallbacks *callbacks, void *user)
-{
-  vt->parser_callbacks = callbacks;
-  vt->cbdata = user;
-}
-
-void *vterm_parser_get_cbdata(VTerm *vt)
-{
-  return vt->cbdata;
-}
-
 VTermValueType vterm_get_attr_type(VTermAttr attr)
 {
   switch(attr) {
@@ -214,10 +248,13 @@ VTermValueType vterm_get_attr_type(VTermAttr attr)
     case VTERM_ATTR_ITALIC:     return VTERM_VALUETYPE_BOOL;
     case VTERM_ATTR_BLINK:      return VTERM_VALUETYPE_BOOL;
     case VTERM_ATTR_REVERSE:    return VTERM_VALUETYPE_BOOL;
+    case VTERM_ATTR_CONCEAL:    return VTERM_VALUETYPE_BOOL;
     case VTERM_ATTR_STRIKE:     return VTERM_VALUETYPE_BOOL;
     case VTERM_ATTR_FONT:       return VTERM_VALUETYPE_INT;
     case VTERM_ATTR_FOREGROUND: return VTERM_VALUETYPE_COLOR;
     case VTERM_ATTR_BACKGROUND: return VTERM_VALUETYPE_COLOR;
+
+    case VTERM_N_ATTRS: return 0;
   }
   return 0; /* UNREACHABLE */
 }
@@ -233,6 +270,8 @@ VTermValueType vterm_get_prop_type(VTermProp prop)
     case VTERM_PROP_REVERSE:       return VTERM_VALUETYPE_BOOL;
     case VTERM_PROP_CURSORSHAPE:   return VTERM_VALUETYPE_INT;
     case VTERM_PROP_MOUSE:         return VTERM_VALUETYPE_INT;
+
+    case VTERM_N_PROPS: return 0;
   }
   return 0; /* UNREACHABLE */
 }
@@ -345,4 +384,21 @@ void vterm_copy_cells(VTermRect dest,
       VTermPos srcpos = { pos.row + downward, pos.col + rightward };
       (*copycell)(pos, srcpos, user);
     }
+}
+
+void vterm_check_version(int major, int minor)
+{
+  if(major != VTERM_VERSION_MAJOR) {
+    fprintf(stderr, "libvterm major version mismatch; %d (wants) != %d (library)\n",
+        major, VTERM_VERSION_MAJOR);
+    exit(1);
+  }
+
+  if(minor > VTERM_VERSION_MINOR) {
+    fprintf(stderr, "libvterm minor version mismatch; %d (wants) > %d (library)\n",
+        minor, VTERM_VERSION_MINOR);
+    exit(1);
+  }
+
+  // Happy
 }
